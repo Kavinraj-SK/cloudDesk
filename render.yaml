@@ -1,0 +1,84 @@
+services:
+  # Backend API + WebSocket Signaling Server
+  - type: web
+    name: clouddesk-backend
+    runtime: node
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: FRONTEND_URL
+        fromService:
+          name: clouddesk-frontend
+          type: web
+          property: host
+      - key: POSTGRES_HOST
+        fromDatabase:
+          name: clouddesk-db
+          property: host
+      - key: POSTGRES_PORT
+        fromDatabase:
+          name: clouddesk-db
+          property: port
+      - key: POSTGRES_DB
+        fromDatabase:
+          name: clouddesk-db
+          property: database
+      - key: POSTGRES_USER
+        fromDatabase:
+          name: clouddesk-db
+          property: user
+      - key: POSTGRES_PASSWORD
+        fromDatabase:
+          name: clouddesk-db
+          property: password
+      - key: REDIS_HOST
+        fromService:
+          name: clouddesk-redis
+          type: redis
+          property: host
+      - key: REDIS_PORT
+        fromService:
+          name: clouddesk-redis
+          type: redis
+          property: port
+
+  # Frontend React/Vite App
+  - type: web
+    name: clouddesk-frontend
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    headers:
+      - path: /*
+        name: Cache-Control
+        value: no-cache
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_API_URL
+        fromService:
+          name: clouddesk-backend
+          type: web
+          property: host
+
+  # Redis (in-memory store for signaling)
+  - type: redis
+    name: clouddesk-redis
+    plan: free
+    maxmemoryPolicy: noeviction
+
+databases:
+  # PostgreSQL
+  - name: clouddesk-db
+    plan: free
+    databaseName: clouddesk
+    user: clouddesk
