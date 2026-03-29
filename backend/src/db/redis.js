@@ -21,9 +21,10 @@ async function connectRedis() {
   } catch (err) {
     console.error('[Redis] Connection failed:', err.message);
     console.log('[Redis] Running in-memory fallback mode');
+    try { redisClient.destroy(); } catch (_) { }
 
     // Destroy the broken client to stop infinite error/reconnect spam
-    try { redisClient.destroy(); } catch (_) {}
+    try { redisClient.destroy(); } catch (_) { }
 
     // In-memory fallback for development
     const store = new Map();
