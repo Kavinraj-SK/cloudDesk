@@ -1,0 +1,181 @@
+# ─── Namespace ────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: clouddesk
+---
+# ─── Backend Deployment ───────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clouddesk-backend
+  namespace: clouddesk
+  labels:
+    app: clouddesk-backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clouddesk-backend
+  template:
+    metadata:
+      labels:
+        app: clouddesk-backend
+    spec:
+      containers:
+        - name: backend
+          image: ghcr.io/YOUR_USERNAME/clouddesk-backend:latest
+          ports:
+            - containerPort: 4000
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "4000"
+            - name: POSTGRES_HOST
+              value: "clouddesk-postgres"
+            - name: POSTGRES_DB
+              value: "clouddesk"
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: clouddesk-secrets
+                  key: postgres-user
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clouddesk-secrets
+                  key: postgres-password
+            - name: REDIS_HOST
+              value: "clouddesk-redis"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 4000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clouddesk-backend
+  namespace: clouddesk
+spec:
+  selector:
+    app: clouddesk-backend
+  ports:
+    - port: 4000
+      targetPort: 4000
+  type: ClusterIP
+---
+# ─── Frontend Deployment ──────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clouddesk-frontend
+  namespace: clouddesk
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clouddesk-frontend
+  template:
+    metadata:
+      labels:
+        app: clouddesk-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: ghcr.io/YOUR_USERNAME/clouddesk-frontend:latest
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clouddesk-frontend
+  namespace: clouddesk
+spec:
+  selector:
+    app: clouddesk-frontend
+  ports:
+    - port: 80
+      targetPort: 80
+  type: ClusterIP
+---
+# ─── Ingress ─────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: clouddesk-ingress
+  namespace: clouddesk
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+spec:
+  rules:
+    - host: clouddesk.yourdomain.com
+      http:
+        paths:
+          - path: /graphql
+            pathType: Prefix
+            backend:
+              service:
+                name: clouddesk-backend
+                port:
+                  number: 4000
+          - path: /socket.io
+            pathType: Prefix
+            backend:
+              service:
+                name: clouddesk-backend
+                port:
+                  number: 4000
+          - path: /metrics
+            pathType: Prefix
+            backend:
+              service:
+                name: clouddesk-backend
+                port:
+                  number: 4000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: clouddesk-frontend
+                port:
+                  number: 80
+---
+# ─── Secrets (replace values with base64 encoded strings) ──────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: clouddesk-secrets
+  namespace: clouddesk
+type: Opaque
+data:
+  postgres-user: Y2xvdWRkZXNr         # clouddesk (base64)
+  postgres-password: Y2xvdWRkZXNrMTIz # clouddesk123 (base64)

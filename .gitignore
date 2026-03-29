@@ -1,0 +1,22 @@
+node_modules/
+dist/
+build/
+.env
+*.local
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+.terraform.lock.hcl
+
+# Editor
+.vscode/
+.idea/
+
+# Rogue directories
+{frontend/
