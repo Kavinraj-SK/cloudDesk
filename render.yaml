@@ -16,7 +16,7 @@ services:
         fromService:
           name: clouddesk-frontend
           type: web
-          property: host
+          property: url
       - key: POSTGRES_HOST
         fromDatabase:
           name: clouddesk-db
@@ -68,7 +68,7 @@ services:
         fromService:
           name: clouddesk-backend
           type: web
-          property: host
+          property: url
 
   # Redis (in-memory store for signaling)
   - type: redis
