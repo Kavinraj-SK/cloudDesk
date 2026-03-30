@@ -13,7 +13,8 @@ export function useSocket() {
   useEffect(() => {
     if (!socketInstance || socketInstance.disconnected) {
       socketInstance = io(SOCKET_URL, {
-        transports: ['polling', 'websocket'],
+        transports: ['websocket', 'polling'],
+        upgrade: true,
         reconnectionAttempts: 10,
         reconnectionDelay: 1000,
         reconnectionDelayMax: 5000,

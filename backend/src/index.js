@@ -65,15 +65,21 @@ async function startServer() {
     console.log(`📊 Metrics:   http://localhost:${PORT}/metrics`);
     console.log(`❤️  Health:    http://localhost:${PORT}/health`);
 
-    // ── Keep-alive self-ping (prevents Railway from sleeping) ──
-    const SELF_URL = process.env.RAILWAY_STATIC_URL
-      ? `https://${process.env.RAILWAY_STATIC_URL}/health`
-      : `http://localhost:${PORT}/health`;
+    // ── Keep-alive self-ping (prevents sleeping on Railway/Render free tier) ──
+    // Railway uses RAILWAY_PUBLIC_DOMAIN, Render uses RENDER_EXTERNAL_URL
+    const SELF_URL =
+      process.env.RAILWAY_PUBLIC_DOMAIN
+        ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/health`
+        : process.env.RENDER_EXTERNAL_URL
+          ? `${process.env.RENDER_EXTERNAL_URL}/health`
+          : `http://localhost:${PORT}/health`;
+
+    console.log(`[Keep-alive] Will ping: ${SELF_URL}`);
 
     setInterval(async () => {
       try {
         const res = await fetch(SELF_URL);
-        console.log(`[Keep-alive] Ping OK: ${res.status}`);
+        console.log(`[Keep-alive] Ping OK: ${res.status} @ ${new Date().toISOString()}`);
       } catch (e) {
         console.warn('[Keep-alive] Ping failed:', e.message);
       }
