@@ -15,19 +15,11 @@ const { metricsRouter } = require('./metrics/prometheus');
 const app = express();
 const httpServer = http.createServer(app);
 
-// Allow any localhost origin in development
+// Open CORS — allow any origin (Railway frontend, localhost, mobile browsers)
 const corsOptions = {
   origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, Postman, curl)
-    if (!origin) return callback(null, true);
-    // Allow any localhost / 127.0.0.1 port
-    if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
-      return callback(null, true);
-    }
-    // Allow configured frontend URL
-    const allowed = process.env.FRONTEND_URL;
-    if (allowed && origin === allowed) return callback(null, true);
-    callback(new Error(`CORS blocked: ${origin}`));
+    // Allow all origins — needed for Railway dynamic URLs and mobile browsers
+    callback(null, true);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -35,7 +27,7 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // preflight
+app.options('*', cors(corsOptions));
 app.use(bodyParser.json());
 
 // Health check
@@ -66,12 +58,26 @@ async function startServer() {
   setupSignaling(httpServer);
 
   const PORT = process.env.PORT || 4000;
-  httpServer.listen(PORT, () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 CloudDesk Server running on port ${PORT}`);
     console.log(`📡 GraphQL:   http://localhost:${PORT}/graphql`);
     console.log(`🔌 Signaling: ws://localhost:${PORT}`);
     console.log(`📊 Metrics:   http://localhost:${PORT}/metrics`);
     console.log(`❤️  Health:    http://localhost:${PORT}/health`);
+
+    // ── Keep-alive self-ping (prevents Railway from sleeping) ──
+    const SELF_URL = process.env.RAILWAY_STATIC_URL
+      ? `https://${process.env.RAILWAY_STATIC_URL}/health`
+      : `http://localhost:${PORT}/health`;
+
+    setInterval(async () => {
+      try {
+        const res = await fetch(SELF_URL);
+        console.log(`[Keep-alive] Ping OK: ${res.status}`);
+      } catch (e) {
+        console.warn('[Keep-alive] Ping failed:', e.message);
+      }
+    }, 4 * 60 * 1000); // every 4 minutes
   });
 }
 
