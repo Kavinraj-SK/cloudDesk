@@ -5,15 +5,42 @@ const ICE_SERVERS = {
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+    // Free TURN servers for cross-network/mobile connections
+    {
+      urls: 'turn:openrelay.metered.ca:80',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
   ],
+  iceCandidatePoolSize: 10,
 };
+
+// Detect if device is mobile
+const isMobile = () => /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+
+// Detect if getDisplayMedia is supported
+const supportsDisplayMedia = () => !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);
 
 export function useWebRTC({ socket, roomId, role, onRemoteStream, onDataMessage }) {
   const pcRef = useRef(null);
   const localStreamRef = useRef(null);
   const dataChannelRef = useRef(null);
+  const pendingCandidatesRef = useRef([]);
   const [connectionState, setConnectionState] = useState('idle');
   const [isMuted, setIsMuted] = useState(false);
+  const [isMobileDevice] = useState(isMobile());
 
   const createPeerConnection = useCallback(() => {
     if (pcRef.current) pcRef.current.close();
@@ -26,6 +53,10 @@ export function useWebRTC({ socket, roomId, role, onRemoteStream, onDataMessage 
       console.log('[WebRTC] Connection state:', pc.connectionState);
     };
 
+    pc.oniceconnectionstatechange = () => {
+      console.log('[WebRTC] ICE state:', pc.iceConnectionState);
+    };
+
     pc.onicecandidate = ({ candidate }) => {
       if (candidate && socket.current) {
         socket.current.emit('ice-candidate', { roomId, candidate });
@@ -33,7 +64,7 @@ export function useWebRTC({ socket, roomId, role, onRemoteStream, onDataMessage 
     };
 
     pc.ontrack = (event) => {
-      console.log('[WebRTC] Remote track received');
+      console.log('[WebRTC] Remote track received:', event.track.kind);
       if (onRemoteStream && event.streams[0]) {
         onRemoteStream(event.streams[0]);
       }
@@ -54,20 +85,40 @@ export function useWebRTC({ socket, roomId, role, onRemoteStream, onDataMessage 
       if (onDataMessage) {
         try {
           onDataMessage(JSON.parse(event.data));
-        } catch (e) {}
+        } catch (e) { }
       }
     };
   };
 
-  // HOST: Start screen sharing and create offer
+  // HOST: Start screen/camera sharing and create offer
   const startScreenShare = useCallback(async () => {
     try {
       setConnectionState('connecting');
 
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: { ideal: 30 }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-        audio: true,
-      });
+      let stream;
+
+      if (supportsDisplayMedia() && !isMobileDevice) {
+        // Desktop: use screen capture
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          video: {
+            frameRate: { ideal: 30, max: 30 },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+            cursor: 'always',
+          },
+          audio: true,
+        });
+      } else {
+        // Mobile fallback: use camera
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: 'environment',
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          audio: true,
+        });
+      }
 
       localStreamRef.current = stream;
       const pc = createPeerConnection();
@@ -79,13 +130,16 @@ export function useWebRTC({ socket, roomId, role, onRemoteStream, onDataMessage 
       // Add tracks
       stream.getTracks().forEach((track) => pc.addTrack(track, stream));
 
-      // Handle stream end (user stops sharing)
-      stream.getVideoTracks()[0].onended = () => {
+      // Handle stream end
+      stream.getTracks()[0].onended = () => {
         stopScreenShare();
       };
 
       // Create offer
-      const offer = await pc.createOffer();
+      const offer = await pc.createOffer({
+        offerToReceiveAudio: false,
+        offerToReceiveVideo: false,
+      });
       await pc.setLocalDescription(offer);
 
       if (socket.current) {
@@ -97,13 +151,21 @@ export function useWebRTC({ socket, roomId, role, onRemoteStream, onDataMessage 
       setConnectionState('failed');
       throw err;
     }
-  }, [createPeerConnection, roomId, socket]);
+  }, [createPeerConnection, roomId, socket, isMobileDevice]);
 
   // VIEWER: Handle incoming offer and create answer
   const handleOffer = useCallback(async (offer) => {
     const pc = createPeerConnection();
 
     await pc.setRemoteDescription(new RTCSessionDescription(offer));
+
+    // Flush any pending ICE candidates
+    for (const candidate of pendingCandidatesRef.current) {
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (e) { }
+    }
+    pendingCandidatesRef.current = [];
 
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
@@ -123,12 +185,16 @@ export function useWebRTC({ socket, roomId, role, onRemoteStream, onDataMessage 
 
   // Both: Handle ICE candidates
   const handleIceCandidate = useCallback(async (candidate) => {
-    if (pcRef.current && candidate) {
+    if (!candidate) return;
+    if (pcRef.current && pcRef.current.remoteDescription) {
       try {
         await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
       } catch (e) {
         console.warn('[WebRTC] ICE candidate error:', e.message);
       }
+    } else {
+      // Queue candidates until remote description is set
+      pendingCandidatesRef.current.push(candidate);
     }
   }, []);
 
@@ -164,6 +230,7 @@ export function useWebRTC({ socket, roomId, role, onRemoteStream, onDataMessage 
   return {
     connectionState,
     isMuted,
+    isMobileDevice,
     startScreenShare,
     stopScreenShare,
     handleOffer,
