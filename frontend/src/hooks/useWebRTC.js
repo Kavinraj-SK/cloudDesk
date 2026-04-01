@@ -83,24 +83,45 @@ export function useWebRTC({ socket, roomId, role, onRemoteStream, onDataMessage 
   // channel     = reliable channel for clicks / keys / scroll
   // moveChannel = unreliable channel for mouse-move (optional, host-side only)
   const setupDataChannel = useCallback((channel, moveChannel) => {
+    if (!channel) {
+      console.error('[WebRTC] setupDataChannel called with null channel');
+      return;
+    }
+
     dataChannelRef.current = channel;
 
-    const attach = (ch) => {
-      ch.onopen = () => console.log('[WebRTC] Data channel open:', ch.label);
-      ch.onclose = () => console.log('[WebRTC] Data channel closed:', ch.label);
-      ch.onerror = (e) => console.warn('[WebRTC] Data channel error:', ch.label, e);
+    const attach = (ch, label) => {
+      if (!ch) return;
+      
+      ch.onopen = () => {
+        console.log('[WebRTC] Data channel open:', label);
+      };
+      
+      ch.onclose = () => {
+        console.log('[WebRTC] Data channel closed:', label);
+      };
+      
+      ch.onerror = (e) => {
+        console.error('[WebRTC] Data channel error:', label, e);
+      };
+      
       ch.onmessage = (event) => {
         if (onDataMessage) {
-          try { onDataMessage(JSON.parse(event.data)); }
-          catch (_) { /* ignore parse errors */ }
+          try {
+            const data = JSON.parse(event.data);
+            onDataMessage(data);
+          } catch (err) {
+            console.warn('[WebRTC] Failed to parse data message:', err.message);
+          }
         }
       };
     };
 
-    attach(channel);
+    attach(channel, channel.label);
+    
     if (moveChannel) {
       dataMoveChannelRef.current = moveChannel;
-      attach(moveChannel);
+      attach(moveChannel, moveChannel.label);
     }
   }, [onDataMessage]);
 
@@ -323,19 +344,33 @@ export function useWebRTC({ socket, roomId, role, onRemoteStream, onDataMessage 
   // Mouse-move → unreliable channel (drop stale packets, never queue)
   // Everything else → reliable channel (guarantee delivery)
   const sendControlEvent = useCallback((eventData) => {
-    const isMove = eventData.type === 'mouse' && eventData.event === 'move';
-    const channel = isMove
-      ? (dataMoveChannelRef.current?.readyState === 'open' ? dataMoveChannelRef.current : dataChannelRef.current)
-      : dataChannelRef.current;
+    if (!eventData) return;
+    
+    try {
+      const isMove = eventData.type === 'mouse' && eventData.event === 'move';
+      const channel = isMove
+        ? (dataMoveChannelRef.current?.readyState === 'open' ? dataMoveChannelRef.current : dataChannelRef.current)
+        : dataChannelRef.current;
 
-    if (channel?.readyState === 'open') {
-      try {
-        channel.send(JSON.stringify(eventData));
-      } catch (e) {
-        console.warn('[WebRTC] sendControlEvent error:', e.message);
+      if (!channel) {
+        console.warn('[WebRTC] No data channel available for event:', eventData.type);
+        return;
       }
-    } else {
-      console.warn('[WebRTC] Data channel not ready (state:', channel?.readyState || 'none', ')');
+
+      if (channel.readyState !== 'open') {
+        console.warn('[WebRTC] Data channel not ready (state:', channel.readyState, ')');
+        return;
+      }
+
+      const payload = JSON.stringify(eventData);
+      channel.send(payload);
+      
+      // Log non-move events for visibility
+      if (!isMove) {
+        console.log('[WebRTC] Sent control event:', eventData.type, eventData.event);
+      }
+    } catch (e) {
+      console.error('[WebRTC] sendControlEvent error:', e.message);
     }
   }, []);
 

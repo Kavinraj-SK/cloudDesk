@@ -70,6 +70,10 @@ def handle_control(data):
         event_type = data.get('type', '')
         event_name = data.get('event', '')
         
+        if not event_type:
+            print('[Agent] Error: Missing event type')
+            return
+        
         # MOUSE EVENTS
         if event_type == 'mouse':
             x, y = to_pixels(data.get('x', 0), data.get('y', 0))
@@ -78,8 +82,11 @@ def handle_control(data):
             if event_name == 'move':
                 pyautogui.moveTo(x, y, duration=0)
             elif event_name == 'click':
-                pyautogui.click(x, y, button=btn, clicks=1)
+                # Click at position with proper timing
+                pyautogui.moveTo(x, y, duration=0)
+                pyautogui.click(button=btn, clicks=1)
             elif event_name == 'mousedown':
+                pyautogui.moveTo(x, y, duration=0)
                 pyautogui.mouseDown(button=btn)
             elif event_name == 'mouseup':
                 pyautogui.mouseUp(button=btn)
@@ -89,9 +96,12 @@ def handle_control(data):
             dy = data.get('deltaY', 0)
             dx = data.get('deltaX', 0)
             if dy != 0:
-                pyautogui.scroll(-int(dy / 120))  # Normalize
+                # Normalize scroll: 120 units per scroll wheel click
+                scroll_amount = max(-3, min(3, -int(dy / 120)))
+                pyautogui.scroll(scroll_amount)
             if dx != 0:
-                pyautogui.hscroll(-int(dx / 120))
+                scroll_amount = max(-3, min(3, -int(dx / 120)))
+                pyautogui.hscroll(scroll_amount)
         
         # KEYBOARD EVENTS
         elif event_type == 'key':
@@ -119,14 +129,18 @@ def handle_control(data):
         elif event_type == 'touch':
             x, y = to_pixels(data.get('x', 0), data.get('y', 0))
             if event_name == 'touchstart':
+                pyautogui.moveTo(x, y, duration=0)
                 pyautogui.mouseDown(button='left')
             elif event_name == 'touchmove':
                 pyautogui.moveTo(x, y, duration=0)
             elif event_name == 'touchend':
                 pyautogui.mouseUp(button='left')
+        
+        else:
+            print(f'[Agent] Unknown event type: {event_type}')
     
     except Exception as e:
-        print(f'[Agent] Event error: {e}')
+        print(f'[Agent] Event error: {type(e).__name__}: {e}')
 
 
 # ── HTTP Server ───────────────────────────────────────────────────────────────

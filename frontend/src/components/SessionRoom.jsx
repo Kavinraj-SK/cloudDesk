@@ -159,13 +159,20 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
   }, []);
 
   // ── Attach remote stream to video el ────────────
-  // In case video mounts after stream arrives
+  // In case video mounts after stream arrives OR if srcObject changed
   useEffect(() => {
-    if (remoteStream && videoRef.current && !videoRef.current.srcObject) {
-      videoRef.current.srcObject = remoteStream;
-      videoRef.current.play().catch(() => { });
-    }
-  }, [remoteStream]);
+    if (!remoteStream || !videoRef.current) return;
+    
+    videoRef.current.srcObject = remoteStream;
+    
+    // Ensure video plays — critical for iOS Safari
+    videoRef.current
+      .play()
+      .catch((err) => {
+        console.error('[SessionRoom] video.play() failed:', err);
+        onNotify(`Video playback failed: ${err.message}`, 'error');
+      });
+  }, [remoteStream, onNotify]);
 
   const beginScreenShare = async () => {
     try {
@@ -209,7 +216,10 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
   // ── Remote Control: Get relative position ───────
   const getRelativePos = (clientX, clientY) => {
     const rect = videoRef.current?.getBoundingClientRect();
-    if (!rect) return null;
+    if (!rect || rect.width === 0 || rect.height === 0) {
+      console.warn('[SessionRoom] Video dimensions invalid for position calc:', rect);
+      return null;
+    }
     return {
       x: Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)),
       y: Math.max(0, Math.min(1, (clientY - rect.top) / rect.height)),
@@ -218,9 +228,13 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
 
   // ── Mouse Events (viewer on desktop) ────────────
   const handleMouseMove = useCallback((e) => {
-    if (!controlEnabled || role !== 'viewer') return;
+    if (!controlEnabled || role !== 'viewer' || !remoteStream) return;
+    
     const pos = getRelativePos(e.clientX, e.clientY);
-    if (!pos) return;
+    if (!pos) {
+      console.warn('[SessionRoom] Failed to calculate mouse position');
+      return;
+    }
 
     // Skip duplicate positions (no actual movement)
     const last = lastMovePos.current;
@@ -237,40 +251,42 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
 
     pendingMoveRef.current = requestAnimationFrame(() => {
       pendingMoveRef.current = null;
-      sendControlEvent({ type: 'mouse', event: 'move', ...pos });
+      if (controlEnabled && role === 'viewer') {
+        sendControlEvent({ type: 'mouse', event: 'move', ...pos });
+      }
     });
-  }, [controlEnabled, role, sendControlEvent]);
+  }, [controlEnabled, role, remoteStream, sendControlEvent]);
 
   const handleMouseClick = useCallback((e) => {
-    if (!controlEnabled || role !== 'viewer') return;
+    if (!controlEnabled || role !== 'viewer' || !remoteStream) return;
     e.preventDefault();
     const pos = getRelativePos(e.clientX, e.clientY);
     if (!pos) return;
     sendControlEvent({ type: 'mouse', event: 'click', button: e.button, ...pos });
-  }, [controlEnabled, role, sendControlEvent]);
+  }, [controlEnabled, role, remoteStream, sendControlEvent]);
 
   const handleMouseDown = useCallback((e) => {
-    if (!controlEnabled || role !== 'viewer') return;
+    if (!controlEnabled || role !== 'viewer' || !remoteStream) return;
     const pos = getRelativePos(e.clientX, e.clientY);
     if (!pos) return;
     sendControlEvent({ type: 'mouse', event: 'mousedown', button: e.button, ...pos });
-  }, [controlEnabled, role, sendControlEvent]);
+  }, [controlEnabled, role, remoteStream, sendControlEvent]);
 
   const handleMouseUp = useCallback((e) => {
-    if (!controlEnabled || role !== 'viewer') return;
+    if (!controlEnabled || role !== 'viewer' || !remoteStream) return;
     const pos = getRelativePos(e.clientX, e.clientY);
     if (!pos) return;
     sendControlEvent({ type: 'mouse', event: 'mouseup', button: e.button, ...pos });
-  }, [controlEnabled, role, sendControlEvent]);
+  }, [controlEnabled, role, remoteStream, sendControlEvent]);
 
   const handleWheel = useCallback((e) => {
-    if (!controlEnabled || role !== 'viewer') return;
+    if (!controlEnabled || role !== 'viewer' || !remoteStream) return;
     e.preventDefault();
     sendControlEvent({ type: 'scroll', event: 'wheel', deltaX: e.deltaX, deltaY: e.deltaY });
-  }, [controlEnabled, role, sendControlEvent]);
+  }, [controlEnabled, role, remoteStream, sendControlEvent]);
 
   const handleKeyDown = useCallback((e) => {
-    if (!controlEnabled || role !== 'viewer') return;
+    if (!controlEnabled || role !== 'viewer' || !remoteStream) return;
     e.preventDefault();
     sendControlEvent({
       type: 'key',
@@ -279,10 +295,10 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
       code: e.code,
       modifiers: { ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey },
     });
-  }, [controlEnabled, role, sendControlEvent]);
+  }, [controlEnabled, role, remoteStream, sendControlEvent]);
 
   const handleKeyUp = useCallback((e) => {
-    if (!controlEnabled || role !== 'viewer') return;
+    if (!controlEnabled || role !== 'viewer' || !remoteStream) return;
     e.preventDefault();
     sendControlEvent({
       type: 'key',
@@ -290,7 +306,7 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
       key: e.key,
       code: e.code,
     });
-  }, [controlEnabled, role, sendControlEvent]);
+  }, [controlEnabled, role, remoteStream, sendControlEvent]);
 
   // ── Touch Events (viewer on mobile) ─────────────
   const getTouchRelativePos = (touch) => getRelativePos(touch.clientX, touch.clientY);
@@ -299,7 +315,7 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
   const lastTouchPosRef = useRef(null);
 
   const handleTouchStart = useCallback((e) => {
-    if (!controlEnabled || role !== 'viewer') return;
+    if (!controlEnabled || role !== 'viewer' || !remoteStream) return;
     e.preventDefault();
     const touch = e.touches[0];
     const pos = getTouchRelativePos(touch);
@@ -329,22 +345,22 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
       lastTouchTimeRef.current = now;
       lastTouchPosRef.current = pos;
     }
-  }, [controlEnabled, role, sendControlEvent]);
+  }, [controlEnabled, role, remoteStream, sendControlEvent]);
 
   const handleTouchMove = useCallback((e) => {
-    if (!controlEnabled || role !== 'viewer') return;
+    if (!controlEnabled || role !== 'viewer' || !remoteStream) return;
     e.preventDefault();
     const touch = e.touches[0];
     const pos = getTouchRelativePos(touch);
     if (!pos) return;
     sendControlEvent({ type: 'touch', event: 'touchmove', ...pos });
-  }, [controlEnabled, role, sendControlEvent]);
+  }, [controlEnabled, role, remoteStream, sendControlEvent]);
 
   const handleTouchEnd = useCallback((e) => {
-    if (!controlEnabled || role !== 'viewer') return;
+    if (!controlEnabled || role !== 'viewer' || !remoteStream) return;
     e.preventDefault();
     sendControlEvent({ type: 'touch', event: 'touchend', touches: e.changedTouches.length });
-  }, [controlEnabled, role, sendControlEvent]);
+  }, [controlEnabled, role, remoteStream, sendControlEvent]);
 
   // Focus video element when control is activated (needed for keyboard events)
   useEffect(() => {
