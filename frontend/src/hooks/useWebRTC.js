@@ -70,7 +70,8 @@ const supportsDisplayMedia = () =>
 export function useWebRTC({ socket, roomId, role, onRemoteStream, onDataMessage }) {
   const pcRef = useRef(null);
   const localStreamRef = useRef(null);
-  const dataChannelRef = useRef(null);
+  const dataChannelRef = useRef(null);  // reliable — clicks / keys
+  const dataMoveChannelRef = useRef(null);  // unreliable — mouse move
   const pendingCandidatesRef = useRef([]);
   const iceRestartTimerRef = useRef(null);
 
@@ -78,19 +79,29 @@ export function useWebRTC({ socket, roomId, role, onRemoteStream, onDataMessage 
   const [isMuted, setIsMuted] = useState(false);
   const [isMobileDevice] = useState(isMobile());
 
-  // ── Setup Data Channel ──────────────────────────
-  const setupDataChannel = useCallback((channel) => {
+  // ── Setup Data Channel(s) ───────────────────────
+  // channel     = reliable channel for clicks / keys / scroll
+  // moveChannel = unreliable channel for mouse-move (optional, host-side only)
+  const setupDataChannel = useCallback((channel, moveChannel) => {
     dataChannelRef.current = channel;
-    channel.onopen = () => console.log('[WebRTC] Data channel open');
-    channel.onclose = () => console.log('[WebRTC] Data channel closed');
-    channel.onerror = (e) => console.warn('[WebRTC] Data channel error:', e);
-    channel.onmessage = (event) => {
-      if (onDataMessage) {
-        try {
-          onDataMessage(JSON.parse(event.data));
-        } catch (e) { /* ignore parse errors */ }
-      }
+
+    const attach = (ch) => {
+      ch.onopen = () => console.log('[WebRTC] Data channel open:', ch.label);
+      ch.onclose = () => console.log('[WebRTC] Data channel closed:', ch.label);
+      ch.onerror = (e) => console.warn('[WebRTC] Data channel error:', ch.label, e);
+      ch.onmessage = (event) => {
+        if (onDataMessage) {
+          try { onDataMessage(JSON.parse(event.data)); }
+          catch (_) { /* ignore parse errors */ }
+        }
+      };
     };
+
+    attach(channel);
+    if (moveChannel) {
+      dataMoveChannelRef.current = moveChannel;
+      attach(moveChannel);
+    }
   }, [onDataMessage]);
 
   // ── Create Peer Connection ──────────────────────
@@ -154,10 +165,15 @@ export function useWebRTC({ socket, roomId, role, onRemoteStream, onDataMessage 
       }
     };
 
-    // Receive data channel (viewer side)
+    // Receive data channels (viewer side — may receive both 'control' and 'mouse-move')
+    const receivedChannels = {};
     pc.ondatachannel = (event) => {
-      console.log('[WebRTC] Data channel received');
-      setupDataChannel(event.channel);
+      const ch = event.channel;
+      console.log('[WebRTC] Data channel received:', ch.label);
+      receivedChannels[ch.label] = ch;
+      if (receivedChannels['control']) {
+        setupDataChannel(receivedChannels['control'], receivedChannels['mouse-move'] || null);
+      }
     };
 
     return pc;
@@ -206,9 +222,14 @@ export function useWebRTC({ socket, roomId, role, onRemoteStream, onDataMessage 
       localStreamRef.current = stream;
       const pc = createPeerConnection();
 
-      // Create data channel BEFORE offer (must be done on offerer side)
+      // ── Two data channels (mirrors AnyDesk's approach) ────────────────
+      // 'control'        — reliable, ordered  → clicks, keystrokes, scroll
+      // 'mouse-move'     — unreliable, no retransmit → position updates only
+      //   maxRetransmits:0 means stale move packets are dropped, not queued,
+      //   which is what makes cursor movement feel instant instead of laggy.
       const dc = pc.createDataChannel('control', { ordered: true });
-      setupDataChannel(dc);
+      const dcMove = pc.createDataChannel('mouse-move', { ordered: false, maxRetransmits: 0 });
+      setupDataChannel(dc, dcMove);
 
       // Add all tracks to peer connection
       stream.getTracks().forEach((track) => {
@@ -299,13 +320,22 @@ export function useWebRTC({ socket, roomId, role, onRemoteStream, onDataMessage 
   }, []);
 
   // ── Viewer: Send Remote Control Event ──────────
+  // Mouse-move → unreliable channel (drop stale packets, never queue)
+  // Everything else → reliable channel (guarantee delivery)
   const sendControlEvent = useCallback((eventData) => {
-    if (dataChannelRef.current?.readyState === 'open') {
+    const isMove = eventData.type === 'mouse' && eventData.event === 'move';
+    const channel = isMove
+      ? (dataMoveChannelRef.current?.readyState === 'open' ? dataMoveChannelRef.current : dataChannelRef.current)
+      : dataChannelRef.current;
+
+    if (channel?.readyState === 'open') {
       try {
-        dataChannelRef.current.send(JSON.stringify(eventData));
+        channel.send(JSON.stringify(eventData));
       } catch (e) {
         console.warn('[WebRTC] sendControlEvent error:', e.message);
       }
+    } else {
+      console.warn('[WebRTC] Data channel not ready (state:', channel?.readyState || 'none', ')');
     }
   }, []);
 
@@ -318,8 +348,12 @@ export function useWebRTC({ socket, roomId, role, onRemoteStream, onDataMessage 
       localStreamRef.current = null;
     }
     if (dataChannelRef.current) {
-      try { dataChannelRef.current.close(); } catch (_) {}
+      try { dataChannelRef.current.close(); } catch (_) { }
       dataChannelRef.current = null;
+    }
+    if (dataMoveChannelRef.current) {
+      try { dataMoveChannelRef.current.close(); } catch (_) { }
+      dataMoveChannelRef.current = null;
     }
     if (pcRef.current) {
       pcRef.current.close();

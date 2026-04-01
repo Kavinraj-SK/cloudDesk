@@ -85,6 +85,7 @@ Backend → Docker on VPS/EC2: `https://api.yourserver.com`
 ### Prerequisites
 - Docker & Docker Compose installed
 - Node.js 20+ (for local dev only)
+- **Python 3.7+** (for remote control feature)
 
 ### 1. Clone
 ```bash
@@ -99,17 +100,53 @@ docker compose up --build
 
 | Service | URL |
 |---|---|
-| Frontend | http://localhost:3000 |
+| Frontend | http://localhost:5173 (Vite dev server) |
+| Backend API | http://localhost:4000 |
 | GraphQL | http://localhost:4000/graphql |
 | Prometheus | http://localhost:9090 |
 | Grafana | http://localhost:3001 (admin / admin123) |
 
-### 3. Test the connection
-1. Open **two browser tabs** at `http://localhost:3000`
+### 3. Start the local agent (for remote control)
+```bash
+# In a new terminal
+python agent/clouddesk-agent.py
+
+# Or Windows:
+agent\start-agent.bat
+```
+
+This agent must be running for remote control to work (like AnyDesk's desktop service).
+
+### 4. Test the connection
+1. Open **two browser tabs** at `http://localhost:5173`
 2. Note your **Desk ID** in Tab 1 (e.g., `123 456 789`)
 3. In Tab 2, enter Tab 1's Desk ID → **Connect**
 4. Tab 1 receives an incoming connection → click **Accept**
 5. Tab 1 clicks **Start Screen Share** → Tab 2 sees the stream ✅
+6. Tab 2 clicks **Control** → Tab 2 can now control Tab 1's mouse/keyboard ✅
+
+---
+
+## 🎮 Remote Control (AnyDesk-style)
+
+CloudDesk includes **full remote control** functionality. The viewer can control the host's:
+- 🖱️ Mouse movements and clicks
+- ⌨️ Keyboard input
+- 🔄 Scroll wheel
+- 👆 Touch events (on mobile)
+
+**How it works**:
+1. Viewer clicks the **Control** button to enable remote input
+2. Control events are sent via WebRTC DataChannel
+3. Host's **local agent** (Python service on localhost:9009) receives events
+4. Agent uses `pyautogui` to inject real OS input
+
+**👉 START HERE**: See [IMPLEMENTATION_COMPLETE.md](IMPLEMENTATION_COMPLETE.md) for a complete overview of what's been implemented and how to use it.
+
+**For detailed instructions**: 
+- [SETUP_GUIDE.md](SETUP_GUIDE.md) - Complete installation & troubleshooting
+- [QUICK_REFERENCE.md](QUICK_REFERENCE.md) - Quick start (2 minutes)
+- [REMOTE_CONTROL.md](REMOTE_CONTROL.md) - Technical deep-dive
 
 ---
 

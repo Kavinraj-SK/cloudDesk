@@ -1,8 +1,6 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { io } from 'socket.io-client';
 
-// Always connect directly to backend port in dev.
-// In prod, set VITE_API_URL to your server URL.
 const SOCKET_URL = import.meta.env.VITE_API_URL || 'http://localhost:4000';
 
 let socketInstance = null;
@@ -48,21 +46,29 @@ export function useSocket() {
     }
   }, []);
 
+  /**
+   * Register a socket event listener.
+   * Safe to call even before the socket is connected — the listener is attached
+   * to the shared socketInstance directly (which persists across renders).
+   * Returns an unsubscribe function for use in useEffect cleanups.
+   */
   const on = useCallback((event, handler) => {
-    if (socketRef.current) {
-      socketRef.current.on(event, handler);
+    // socketInstance is the module-level singleton — always available after first mount
+    const sock = socketRef.current || socketInstance;
+    if (sock) {
+      sock.on(event, handler);
+    } else {
+      console.warn('[Socket] on() called before socket was initialised — event:', event);
     }
     return () => {
-      if (socketRef.current) {
-        socketRef.current.off(event, handler);
-      }
+      const s = socketRef.current || socketInstance;
+      if (s) s.off(event, handler);
     };
   }, []);
 
   const off = useCallback((event, handler) => {
-    if (socketRef.current) {
-      socketRef.current.off(event, handler);
-    }
+    const sock = socketRef.current || socketInstance;
+    if (sock) sock.off(event, handler);
   }, []);
 
   return { socket: socketRef, emit, on, off };

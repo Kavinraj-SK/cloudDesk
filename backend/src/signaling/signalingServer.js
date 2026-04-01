@@ -114,7 +114,9 @@ function setupSignaling(httpServer) {
 
     // Chat message
     socket.on('chat-message', ({ roomId, message, senderDeskId }) => {
-      io.to(roomId).emit('chat-message', { message, senderDeskId, timestamp: Date.now() });
+      // socket.to() excludes the sender — frontend adds its own message optimistically,
+      // so broadcasting back to sender would cause duplicate display.
+      socket.to(roomId).emit('chat-message', { message, senderDeskId, timestamp: Date.now() });
     });
 
     // Leave room / disconnect

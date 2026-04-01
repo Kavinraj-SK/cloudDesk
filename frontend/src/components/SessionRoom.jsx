@@ -15,6 +15,14 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
   const [chatInput, setChatInput] = useState('');
   const [elapsed, setElapsed] = useState(0);
   const [controlEnabled, setControlEnabled] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [cursorPos, setCursorPos] = useState({ x: -100, y: -100 }); // viewer-side custom cursor
+  const chatEndRef = useRef(null); // auto-scroll anchor
+  // Local agent (clouddesk-agent.py) connection status
+  // The agent runs on the HOST's machine and executes OS-level mouse/keyboard events
+  const [agentStatus, setAgentStatus] = useState('unchecked'); // 'unchecked'|'online'|'offline'
+  const agentCheckRef = useRef(null);
+  const AGENT_URL = 'http://localhost:9009';
 
   // Virtual cursor state (shown on HOST when viewer sends control events)
   const [virtualCursor, setVirtualCursor] = useState(null); // { x, y } in %
@@ -59,38 +67,49 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
       }
     },
 
-    // HOST-side: receives control events from viewer via WebRTC data channel
+    // HOST-side: receives control events from viewer via WebRTC data channel.
+    // Events are forwarded to the CloudDesk local agent (clouddesk-agent.py / agent/index.js)
+    // running on localhost:9009, which uses pyautogui/robotjs to execute real OS input.
     onDataMessage: (data) => {
       if (!data) return;
 
-      // Show virtual cursor on host side so host can see where viewer is pointing
+      // ── Forward to local OS agent ─────────────────────────────────────────
+      // The browser cannot move the OS cursor/send keystrokes directly —
+      // the local agent bridges the gap (exactly like AnyDesk's desktop service).
+      fetch('http://localhost:9009/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      }).catch(() => {
+        // Agent offline — update status but don't spam UI
+        setAgentStatus((s) => (s !== 'offline' ? 'offline' : s));
+      });
+
+      // ── Virtual cursor (HOST sees where viewer's pointer is) ──────────────
       if (data.type === 'mouse' && (data.event === 'move' || data.event === 'click' || data.event === 'mousedown')) {
         setVirtualCursor({ x: data.x * 100, y: data.y * 100 });
         clearTimeout(virtualCursorTimerRef.current);
         virtualCursorTimerRef.current = setTimeout(() => setVirtualCursor(null), 3000);
       }
-
-      // Show touch indicator on host for mobile control
       if (data.type === 'touch' && data.event === 'touchstart') {
         setVirtualCursor({ x: data.x * 100, y: data.y * 100 });
         clearTimeout(virtualCursorTimerRef.current);
         virtualCursorTimerRef.current = setTimeout(() => setVirtualCursor(null), 2000);
       }
 
-      // Show control log overlay (brief label)
+      // ── Control log overlay ───────────────────────────────────────────────
       let logMsg = '';
       if (data.type === 'mouse') logMsg = `🖱 ${data.event}${data.event === 'click' ? ` (btn ${data.button})` : ''}`;
       if (data.type === 'key') logMsg = `⌨ ${data.event}: ${data.key}`;
       if (data.type === 'touch') logMsg = `👆 ${data.event}`;
       if (data.type === 'scroll') logMsg = `↕ scroll ${data.deltaY > 0 ? '▼' : '▲'}`;
-
       if (logMsg) {
         setControlLog(logMsg);
         clearTimeout(controlLogTimerRef.current);
         controlLogTimerRef.current = setTimeout(() => setControlLog(''), 1500);
       }
 
-      console.log('[Control] Received from viewer:', data);
+      console.log('[Control] Forwarded to agent:', data);
     },
   });
 
@@ -126,7 +145,12 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
     const c6 = on('chat-message', ({ message, senderDeskId, timestamp }) => {
       setMessages((prev) => [...prev, { message, senderDeskId, timestamp, own: senderDeskId === deskId }]);
     });
-    return () => { c1(); c2(); c3(); c4(); c5(); c6(); };
+    // room-ready fires after accept-connection so both peers know the room is set up.
+    // Viewer side uses this to confirm they're in the room before WebRTC negotiation.
+    const c7 = on('room-ready', ({ roomId: readyRoom }) => {
+      console.log('[SessionRoom] room-ready received for room:', readyRoom);
+    });
+    return () => { c1(); c2(); c3(); c4(); c5(); c6(); c7(); };
   }, [role, handleOffer, handleAnswer, handleIceCandidate]);
 
   // ── Auto-start screen share if host ─────────────
@@ -208,6 +232,9 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
     if (pendingMoveRef.current) {
       cancelAnimationFrame(pendingMoveRef.current);
     }
+    // Update local cursor dot position immediately (before RAF) for smooth visual
+    setCursorPos({ x: e.clientX, y: e.clientY });
+
     pendingMoveRef.current = requestAnimationFrame(() => {
       pendingMoveRef.current = null;
       sendControlEvent({ type: 'mouse', event: 'move', ...pos });
@@ -268,13 +295,40 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
   // ── Touch Events (viewer on mobile) ─────────────
   const getTouchRelativePos = (touch) => getRelativePos(touch.clientX, touch.clientY);
 
+  const lastTouchTimeRef = useRef(0);
+  const lastTouchPosRef = useRef(null);
+
   const handleTouchStart = useCallback((e) => {
     if (!controlEnabled || role !== 'viewer') return;
     e.preventDefault();
     const touch = e.touches[0];
     const pos = getTouchRelativePos(touch);
     if (!pos) return;
-    sendControlEvent({ type: 'touch', event: 'touchstart', ...pos, touches: e.touches.length });
+
+    // Detect double-tap for right-click
+    const now = Date.now();
+    const lastTime = lastTouchTimeRef.current;
+    const lastPos = lastTouchPosRef.current;
+    const doubleTapThreshold = 300; // milliseconds
+    const distanceThreshold = 50; // pixels
+    
+    const isDoubleTap = 
+      lastPos &&
+      lastTime &&
+      (now - lastTime) < doubleTapThreshold &&
+      Math.hypot(pos.x - lastPos.x, pos.y - lastPos.y) < distanceThreshold;
+
+    if (isDoubleTap) {
+      // Double-tap = right-click
+      sendControlEvent({ type: 'mouse', event: 'click', button: 2, ...pos });
+      lastTouchTimeRef.current = 0;
+      lastTouchPosRef.current = null;
+    } else {
+      // Single touch starts = left mouse down
+      sendControlEvent({ type: 'touch', event: 'touchstart', ...pos, touches: e.touches.length });
+      lastTouchTimeRef.current = now;
+      lastTouchPosRef.current = pos;
+    }
   }, [controlEnabled, role, sendControlEvent]);
 
   const handleTouchMove = useCallback((e) => {
@@ -289,7 +343,6 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
   const handleTouchEnd = useCallback((e) => {
     if (!controlEnabled || role !== 'viewer') return;
     e.preventDefault();
-    // Detect double-tap for right-click simulation
     sendControlEvent({ type: 'touch', event: 'touchend', touches: e.changedTouches.length });
   }, [controlEnabled, role, sendControlEvent]);
 
@@ -299,6 +352,39 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
       videoRef.current.focus();
     }
   }, [controlEnabled]);
+
+  // ── Agent health-check (HOST only) ───────────────
+  // Polls localhost:9009/ping every 5 seconds to show agent online/offline status
+  useEffect(() => {
+    if (role !== 'host') return;
+    const checkAgent = () => {
+      fetch('http://localhost:9009/ping', { signal: AbortSignal.timeout(1500) })
+        .then((r) => r.ok ? setAgentStatus('online') : setAgentStatus('offline'))
+        .catch(() => setAgentStatus('offline'));
+    };
+    checkAgent(); // immediate first check
+    agentCheckRef.current = setInterval(checkAgent, 5000);
+    return () => clearInterval(agentCheckRef.current);
+  }, [role]);
+
+  // ── Auto-scroll chat to bottom on new message ───
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  // ── Increment unread badge when panel is closed ───
+  useEffect(() => {
+    if (!chatOpen && messages.length > 0) {
+      // Only count messages we didn't send ourselves
+      const last = messages[messages.length - 1];
+      if (last && !last.own) setUnreadCount((n) => n + 1);
+    }
+  }, [messages]);
+
+  // ── Clear unread when panel opens ────────────────
+  useEffect(() => {
+    if (chatOpen) setUnreadCount(0);
+  }, [chatOpen]);
 
   // ── Chat ─────────────────────────────────────────
   const sendMessage = () => {
@@ -386,6 +472,11 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
             title="Chat"
           >
             <MessageSquare className="w-4 h-4" />
+            {unreadCount > 0 && !chatOpen && (
+              <span className="absolute -top-1 -right-1 min-w-[16px] h-4 bg-brand-red text-white text-[10px] font-bold rounded-full flex items-center justify-center px-0.5 leading-none">
+                {unreadCount > 9 ? '9+' : unreadCount}
+              </span>
+            )}
           </button>
 
           <button onClick={toggleFullscreen} className="p-2 rounded-lg bg-dark-700 text-dark-300 hover:bg-dark-600 transition-colors hidden sm:block" title="Fullscreen">
@@ -429,13 +520,20 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
                 tabIndex={controlEnabled ? 0 : -1}
               />
 
-              {/* Custom cursor overlay (viewer side — hides native cursor) */}
+              {/* Custom cursor dot — follows mouse on viewer side when control is ON */}
               {controlEnabled && (
                 <div
-                  className="pointer-events-none absolute inset-0"
-                  style={{ cursor: 'none' }}
+                  className="pointer-events-none fixed z-50"
+                  style={{
+                    left: cursorPos.x,
+                    top: cursorPos.y,
+                    transform: 'translate(-50%, -50%)',
+                  }}
                 >
-                  {/* Cursor dot follows mouse via CSS (native cursor hidden above) */}
+                  {/* Outer ring */}
+                  <div className="absolute w-5 h-5 rounded-full border-2 border-brand-red opacity-70 -translate-x-1/2 -translate-y-1/2" />
+                  {/* Centre dot */}
+                  <div className="w-1.5 h-1.5 rounded-full bg-brand-red -translate-x-1/2 -translate-y-1/2 relative" />
                 </div>
               )}
 
@@ -490,6 +588,27 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
                     <div className={`text-xs font-mono px-3 py-1.5 rounded-lg ${isFailed ? 'bg-red-900/30 text-red-400' : 'bg-dark-800 text-dark-400'}`}>
                       WebRTC: {connectionState}
                     </div>
+
+                    {/* Local agent status — required for remote control to work */}
+                    <div className={`flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg border ${agentStatus === 'online'
+                        ? 'bg-green-900/20 text-green-400 border-green-900/40'
+                        : agentStatus === 'offline'
+                          ? 'bg-yellow-900/20 text-yellow-400 border-yellow-900/40'
+                          : 'bg-dark-800 text-dark-500 border-dark-700'
+                      }`}>
+                      <div className={`w-1.5 h-1.5 rounded-full ${agentStatus === 'online' ? 'bg-green-400' : agentStatus === 'offline' ? 'bg-yellow-400 animate-pulse' : 'bg-dark-600'
+                        }`} />
+                      Agent: {agentStatus === 'online' ? 'Running' : agentStatus === 'offline' ? 'Not running' : 'Checking…'}
+                    </div>
+
+                    {/* Warn host if agent is offline — remote control won't work without it */}
+                    {agentStatus === 'offline' && (
+                      <div className="text-xs text-yellow-300/80 bg-yellow-900/20 border border-yellow-900/40 rounded-lg px-3 py-2 text-left leading-relaxed">
+                        <strong>Remote control needs the local agent.</strong>
+                        <br />Run <code className="bg-black/30 px-1 rounded">python agent/clouddesk-agent.py</code> on this machine.
+                      </div>
+                    )}
+
                     {isFailed && (
                       <button onClick={handleReconnect} className="btn-primary w-full flex items-center justify-center gap-2 text-sm">
                         <RefreshCw className="w-4 h-4" />
@@ -549,7 +668,7 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
                 </div>
               ) : (
                 messages.map((msg, i) => (
-                  <div key={i} className={`flex flex-col gap-1 ${msg.own ? 'items-end' : 'items-start'}`}>
+                  <div key={`${msg.senderDeskId}-${msg.timestamp}-${i}`} className={`flex flex-col gap-1 ${msg.own ? 'items-end' : 'items-start'}`}>
                     <span className="text-xs text-dark-600 font-mono">{formatDeskId(msg.senderDeskId)}</span>
                     <div className={`px-3 py-2 rounded-xl text-sm max-w-[85%] ${msg.own ? 'bg-brand-red text-white rounded-tr-sm' : 'bg-dark-700 text-dark-100 rounded-tl-sm'}`}>
                       {msg.message}
@@ -557,6 +676,8 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
                   </div>
                 ))
               )}
+              {/* Invisible anchor — scrolled into view when messages update */}
+              <div ref={chatEndRef} />
             </div>
             <div className="p-3 border-t border-dark-800 flex gap-2">
               <input
