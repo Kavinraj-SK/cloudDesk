@@ -1,216 +1,210 @@
 #!/usr/bin/env python3
 """
-CloudDesk Local Agent
-=====================
-Runs on the HOST machine and listens on http://localhost:9009.
-The browser (SessionRoom.jsx host side) POSTs control events here;
-this agent translates them into real OS mouse/keyboard input using pyautogui.
+CloudDesk Local Agent v2.0
+===========================
+Reliable remote control agent for CloudDesk.
+Listens on http://localhost:9009 and injects OS-level input.
 
-This is the same pattern AnyDesk uses — a lightweight background service
-that bridges browser-level WebRTC data with OS-level input injection.
+Based on AnyDesk's agent pattern — proven, simple, reliable.
 
-Usage
------
-  pip install pyautogui flask flask-cors
-  python clouddesk-agent.py
+Installation:
+  pip install pyautogui keyboard mouse
 
-Windows users: pip install pyautogui flask flask-cors pywin32
-macOS users  : grant Accessibility permission to Terminal in System Prefs
+Usage:
+  python3 clouddesk-agent.py
 """
 
 import sys
 import json
-import threading
-import time
+import platform
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
+# Try to import dependencies
 try:
     import pyautogui
+    pyautogui.FAILSAFE = False
+    pyautogui.PAUSE = 0.0
 except ImportError:
-    print("[CloudDesk Agent] ERROR: pyautogui not found.")
-    print("  Install it with:  pip install pyautogui")
+    print("[Agent] ERROR: pyautogui not found")
+    print("  pip install pyautogui")
     sys.exit(1)
 
-# ── pyautogui safety settings ───────────────────────────────────────────────
-pyautogui.FAILSAFE   = False   # Don't abort when cursor hits corner
-pyautogui.PAUSE      = 0.0     # No inter-action delay (we throttle on the sender side)
+# Optional: use pynput for better keyboard handling on some systems
+try:
+    from pynput.keyboard import Controller, Key
+    from pynput.mouse import Controller as MouseController
+    HAS_PYNPUT = True
+except ImportError:
+    HAS_PYNPUT = False
 
 PORT         = 9009
 SCREEN_W, SCREEN_H = pyautogui.size()
+PLATFORM = platform.system()
 
-# Map browser button index → pyautogui button name
+# Button mapping
 BUTTON_MAP = {0: 'left', 1: 'middle', 2: 'right'}
 
-# Map JS KeyboardEvent.key values that need special treatment
+# Key name mapping (JS → pyautogui)
 KEY_MAP = {
-    'ArrowLeft':  'left',    'ArrowRight': 'right',
-    'ArrowUp':    'up',      'ArrowDown':  'down',
-    'Enter':      'enter',   'Escape':     'esc',
-    'Backspace':  'backspace','Delete':     'delete',
-    'Tab':        'tab',     'CapsLock':   'capslock',
-    'Control':    'ctrl',    'Shift':      'shift',
-    'Alt':        'alt',     'Meta':       'win',
-    'Insert':     'insert',  'Home':       'home',
-    'End':        'end',     'PageUp':     'pageup',
-    'PageDown':   'pagedown','F1':         'f1',
-    'F2':         'f2',      'F3':         'f3',
-    'F4':         'f4',      'F5':         'f5',
-    'F6':         'f6',      'F7':         'f7',
-    'F8':         'f8',      'F9':         'f9',
-    'F10':        'f10',     'F11':        'f11',
-    'F12':        'f12',     ' ':          'space',
+    'ArrowLeft': 'left', 'ArrowRight': 'right', 'ArrowUp': 'up', 'ArrowDown': 'down',
+    'Enter': 'enter', 'Escape': 'esc', 'Backspace': 'backspace', 'Delete': 'delete',
+    'Tab': 'tab', 'CapsLock': 'capslock', ' ': 'space',
+    'Insert': 'insert', 'Home': 'home', 'End': 'end', 'PageUp': 'pageup', 'PageDown': 'pagedown',
+    'F1': 'f1', 'F2': 'f2', 'F3': 'f3', 'F4': 'f4', 'F5': 'f5', 'F6': 'f6', 'F7': 'f7',
+    'F8': 'f8', 'F9': 'f9', 'F10': 'f10', 'F11': 'f11', 'F12': 'f12',
+    'Control': 'ctrl', 'Shift': 'shift', 'Alt': 'alt', 'Meta': 'cmd' if PLATFORM == 'Darwin' else 'win',
 }
 
-
-def fraction_to_pixels(x_frac, y_frac):
-    """Convert 0–1 normalised coordinates to absolute screen pixels."""
+def to_pixels(x_frac, y_frac):
+    """Normalize 0-1 coords to screen pixels."""
     return int(x_frac * SCREEN_W), int(y_frac * SCREEN_H)
 
+def map_key(js_key):
+    """Map JS key name to pyautogui name."""
+    return KEY_MAP.get(js_key, js_key.lower() if len(js_key) == 1 else None)
 
 def handle_control(data):
-    """Execute one control event on the OS."""
-    t = data.get('type')
-    ev = data.get('event')
-
+    """Process remote control event (no exceptions escape)."""
     try:
-        # ── Mouse ────────────────────────────────────────────────────────────
-        if t == 'mouse':
-            px, py = fraction_to_pixels(data.get('x', 0), data.get('y', 0))
-            btn    = BUTTON_MAP.get(data.get('button', 0), 'left')
-
-            if ev == 'move':
-                pyautogui.moveTo(px, py, duration=0, _pause=False)
-
-            elif ev == 'mousedown':
-                pyautogui.mouseDown(px, py, button=btn, _pause=False)
-
-            elif ev == 'mouseup':
-                pyautogui.mouseUp(px, py, button=btn, _pause=False)
-
-            elif ev == 'click':
-                pyautogui.click(px, py, button=btn, _pause=False)
-
-        # ── Scroll ───────────────────────────────────────────────────────────
-        elif t == 'scroll':
-            delta_y = data.get('deltaY', 0)
-            delta_x = data.get('deltaX', 0)
-            # pyautogui scroll: positive = up, negative = down
-            if delta_y != 0:
-                clicks = -int(delta_y / 100)   # normalise browser deltaY (px) → clicks
-                pyautogui.scroll(clicks, _pause=False)
-            if delta_x != 0:
-                clicks = -int(delta_x / 100)
-                pyautogui.hscroll(clicks, _pause=False)
-
-        # ── Keyboard ─────────────────────────────────────────────────────────
-        elif t == 'key':
-            raw_key  = data.get('key', '')
-            key_name = KEY_MAP.get(raw_key, raw_key.lower() if len(raw_key) == 1 else None)
+        event_type = data.get('type', '')
+        event_name = data.get('event', '')
+        
+        # MOUSE EVENTS
+        if event_type == 'mouse':
+            x, y = to_pixels(data.get('x', 0), data.get('y', 0))
+            btn = BUTTON_MAP.get(data.get('button', 0), 'left')
+            
+            if event_name == 'move':
+                pyautogui.moveTo(x, y, duration=0)
+            elif event_name == 'click':
+                pyautogui.click(x, y, button=btn, clicks=1)
+            elif event_name == 'mousedown':
+                pyautogui.mouseDown(button=btn)
+            elif event_name == 'mouseup':
+                pyautogui.mouseUp(button=btn)
+        
+        # SCROLL EVENTS
+        elif event_type == 'scroll':
+            dy = data.get('deltaY', 0)
+            dx = data.get('deltaX', 0)
+            if dy != 0:
+                pyautogui.scroll(-int(dy / 120))  # Normalize
+            if dx != 0:
+                pyautogui.hscroll(-int(dx / 120))
+        
+        # KEYBOARD EVENTS
+        elif event_type == 'key':
+            key = data.get('key', '')
+            key_name = map_key(key)
             if not key_name:
-                return  # Unrecognised key — skip safely
-
-            mods    = data.get('modifiers', {})
-
-            if ev == 'keydown':
-                # For keydown with modifiers, press each modifier then the main key
-                if mods.get('ctrl'):  pyautogui.keyDown('ctrl', _pause=False)
-                if mods.get('alt'):   pyautogui.keyDown('alt', _pause=False)
-                if mods.get('shift'): pyautogui.keyDown('shift', _pause=False)
-                if mods.get('meta'):  pyautogui.keyDown('win', _pause=False)
-                pyautogui.keyDown(key_name, _pause=False)
-
-            elif ev == 'keyup':
-                # Release the main key first, then release modifiers
-                pyautogui.keyUp(key_name, _pause=False)
-                if mods.get('meta'):  pyautogui.keyUp('win', _pause=False)
-                if mods.get('shift'): pyautogui.keyUp('shift', _pause=False)
-                if mods.get('alt'):   pyautogui.keyUp('alt', _pause=False)
-                if mods.get('ctrl'):  pyautogui.keyUp('ctrl', _pause=False)
-
-        # ── Touch (mobile controller → treat as mouse) ────────────────────
-        elif t == 'touch':
-            px, py = fraction_to_pixels(data.get('x', 0), data.get('y', 0))
-
-            if ev == 'touchstart':
-                pyautogui.mouseDown(px, py, button='left', _pause=False)
-            elif ev == 'touchmove':
-                pyautogui.moveTo(px, py, duration=0, _pause=False)
-            elif ev == 'touchend':
-                pyautogui.mouseUp(button='left', _pause=False)
-
-    except Exception as exc:
-        # Never crash the agent on a bad event
-        print(f'[Agent] Event error ({t}/{ev}): {exc}')
+                return
+            
+            mods = data.get('modifiers', {})
+            mod_list = []
+            if mods.get('ctrl'): mod_list.append('ctrl')
+            if mods.get('alt'): mod_list.append('alt')
+            if mods.get('shift'): mod_list.append('shift')
+            if mods.get('meta'): mod_list.append('cmd' if PLATFORM == 'Darwin' else 'win')
+            
+            if event_name == 'keydown':
+                if mod_list:
+                    pyautogui.hotkey(*mod_list, key_name)
+                else:
+                    pyautogui.press(key_name)
+            elif event_name == 'keyup':
+                pass  # pyautogui handles this automatically
+        
+        # TOUCH EVENTS (convert to mouse)
+        elif event_type == 'touch':
+            x, y = to_pixels(data.get('x', 0), data.get('y', 0))
+            if event_name == 'touchstart':
+                pyautogui.mouseDown(button='left')
+            elif event_name == 'touchmove':
+                pyautogui.moveTo(x, y, duration=0)
+            elif event_name == 'touchend':
+                pyautogui.mouseUp(button='left')
+    
+    except Exception as e:
+        print(f'[Agent] Event error: {e}')
 
 
 # ── HTTP Server ───────────────────────────────────────────────────────────────
 
 class AgentHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        pass   # Suppress default access log noise
+        pass  # Silent HTTP logs
 
-    def _send(self, code, body='OK'):
-        encoded = body.encode()
-        self.send_response(code)
+    def _send(self, status, data):
+        """Send JSON response."""
+        if isinstance(data, dict):
+            body = json.dumps(data).encode()
+        else:
+            body = data.encode() if isinstance(data, str) else data
+        
+        self.send_response(status)
         self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', str(len(encoded)))
-        # Allow requests from any localhost origin (the browser tab)
+        self.send_header('Content-Length', str(len(body)))
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
-        self.wfile.write(encoded)
+        self.wfile.write(body)
 
     def do_OPTIONS(self):
-        """CORS preflight"""
-        self._send(204, '')
+        self._send(204, b'')
 
     def do_GET(self):
-        path = urlparse(self.path).path
-        if path == '/ping':
-            self._send(200, json.dumps({'status': 'ok', 'screen': [SCREEN_W, SCREEN_H]}))
+        if self.path == '/ping':
+            self._send(200, {'status': 'ok', 'screen': [SCREEN_W, SCREEN_H], 'platform': PLATFORM})
         else:
-            self._send(404, json.dumps({'error': 'not found'}))
+            self._send(404, {'error': 'Not found'})
 
     def do_POST(self):
-        path = urlparse(self.path).path
-        if path == '/control':
-            length = int(self.headers.get('Content-Length', 0))
-            body   = self.rfile.read(length)
+        if self.path == '/control':
             try:
-                data = json.loads(body)
-                # Execute in the calling thread — fast enough for input events
-                handle_control(data)
-                self._send(200, json.dumps({'ok': True}))
-            except Exception as exc:
-                self._send(400, json.dumps({'error': str(exc)}))
+                length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(length)
+                event = json.loads(body)
+                handle_control(event)
+                self._send(200, {'status': 'ok'})
+            except json.JSONDecodeError:
+                self._send(400, {'error': 'Invalid JSON'})
+            except Exception as e:
+                self._send(500, {'error': str(e)})
         else:
-            self._send(404, json.dumps({'error': 'not found'}))
+            self._send(404, {'error': 'Not found'})
 
 
-def run():
-    print(f"""
+def main():
+    """Start the agent server."""
+    banner = f"""
 ╔══════════════════════════════════════════════════╗
-║          CloudDesk Local Agent  v1.0             ║
+║       CloudDesk Local Agent v2.0 Running        ║
 ╠══════════════════════════════════════════════════╣
-║  Listening on  http://localhost:{PORT}              ║
-║  Screen size   {SCREEN_W} × {SCREEN_H}              {"" if SCREEN_W >= 1000 else " "}║
+║  URL:          http://127.0.0.1:{PORT}           ║
+║  Screen:       {SCREEN_W} × {SCREEN_H} px          ║
+║  Platform:     {PLATFORM.upper()}                        ║
 ║                                                  ║
-║  The CloudDesk browser tab will forward          ║
-║  mouse & keyboard events here and this agent     ║
-║  will execute them on your OS.                   ║
-║                                                  ║
-║  Press Ctrl+C to stop.                           ║
+║  Listening for remote control events...        ║
+║  Press Ctrl+C to stop                          ║
 ╚══════════════════════════════════════════════════╝
-""")
-    server = HTTPServer(('127.0.0.1', PORT), AgentHandler)
+"""
+    print(banner)
+    
     try:
+        server = HTTPServer(('127.0.0.1', PORT), AgentHandler)
         server.serve_forever()
     except KeyboardInterrupt:
-        print('\n[CloudDesk Agent] Stopped.')
-        server.server_close()
+        print('\n[Agent] Stopped by user')
+    except Exception as e:
+        print(f'\n[Agent] Error: {e}')
+    finally:
+        try:
+            server.server_close()
+        except:
+            pass
 
 
 if __name__ == '__main__':
-    run()
+    main()

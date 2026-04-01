@@ -66,20 +66,36 @@ function startCloudDeskAgent() {
   if (agentStarted) return;
   agentStarted = true;
 
-  const agentScript = path.join(__dirname, '../../agent/clouddesk-agent.py');
+  const agentScript = path.join(__dirname, '../../terraform/agent/clouddesk-agent.py');
   
   if (!fs.existsSync(agentScript)) {
     console.warn(
       '⚠️  [CloudDesk Agent] Script not found: ' + agentScript + '\n' +
-      '   Remote control will not work. Make sure the agent files exist.'
+      '   Remote control will not work. Make sure terraform/agent/clouddesk-agent.py exists.'
     );
     return;
   }
 
   // Detect Python installation
-  const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
+  let pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
+  
+  // On Windows, prefer the full Python 3.12 path if available
+  if (process.platform === 'win32') {
+    const pythonPaths = [
+      'C:\\Users\\Kavinraj\\AppData\\Local\\Programs\\Python\\Python312\\python.exe',
+      'C:\\Users\\Kavinraj\\AppData\\Local\\Programs\\Python\\Python311\\python.exe',
+      'C:\\Users\\Kavinraj\\AppData\\Local\\Programs\\Python\\Python310\\python.exe',
+    ];
+    for (const path of pythonPaths) {
+      if (fs.existsSync(path)) {
+        pythonCmd = path;
+        break;
+      }
+    }
+  }
   
   console.log('[CloudDesk Agent] Starting local agent for remote control...');
+  console.log('[CloudDesk Agent] Using Python:', pythonCmd);
   
   try {
     agentProcess = spawn(pythonCmd, [agentScript], {
