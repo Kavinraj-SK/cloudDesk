@@ -71,7 +71,12 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
     // Events are forwarded to the CloudDesk local agent (clouddesk-agent.py / agent/index.js)
     // running on localhost:9009, which uses pyautogui/robotjs to execute real OS input.
     onDataMessage: (data) => {
-      if (!data) return;
+      if (!data) {
+        console.warn('[Host] Received empty data message');
+        return;
+      }
+
+      console.log('[Host] Received control event:', data.type, data.event);
 
       // ── Forward to local OS agent ─────────────────────────────────────────
       // The browser cannot move the OS cursor/send keystrokes directly —
@@ -80,10 +85,21 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
-      }).catch(() => {
-        // Agent offline — update status but don't spam UI
-        setAgentStatus((s) => (s !== 'offline' ? 'offline' : s));
-      });
+      })
+        .then((response) => {
+          if (!response.ok) {
+            console.error('[Host] Agent returned status:', response.status);
+            setAgentStatus('offline');
+          } else {
+            console.log('[Host] Agent executed:', data.type, data.event);
+            setAgentStatus('online');
+          }
+          return response.json().catch(() => null);
+        })
+        .catch((err) => {
+          console.error('[Host] Agent error:', err.message);
+          setAgentStatus('offline');
+        });
 
       // ── Virtual cursor (HOST sees where viewer's pointer is) ──────────────
       if (data.type === 'mouse' && (data.event === 'move' || data.event === 'click' || data.event === 'mousedown')) {
@@ -108,8 +124,6 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
         clearTimeout(controlLogTimerRef.current);
         controlLogTimerRef.current = setTimeout(() => setControlLog(''), 1500);
       }
-
-      console.log('[Control] Forwarded to agent:', data);
     },
   });
 
