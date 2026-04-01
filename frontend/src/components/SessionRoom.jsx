@@ -15,8 +15,10 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
   const [chatInput, setChatInput] = useState('');
   const [elapsed, setElapsed] = useState(0);
   const [controlEnabled, setControlEnabled] = useState(false);
+  const [hostControlEnabled, setHostControlEnabled] = useState(false); // HOST can control VIEWER
   const [unreadCount, setUnreadCount] = useState(0);
   const [cursorPos, setCursorPos] = useState({ x: -100, y: -100 }); // viewer-side custom cursor
+  const [hostCursorPos, setHostCursorPos] = useState({ x: -100, y: -100 }); // host-side custom cursor
   const chatEndRef = useRef(null); // auto-scroll anchor
   // Local agent (clouddesk-agent.py) connection status
   // The agent runs on the HOST's machine and executes OS-level mouse/keyboard events
@@ -50,6 +52,7 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
     handleAnswer,
     handleIceCandidate,
     sendControlEvent,
+    sendRemoteControl,
     toggleMute,
   } = useWebRTC({
     socket,
@@ -67,20 +70,23 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
       }
     },
 
-    // HOST-side: receives control events from viewer via WebRTC data channel.
-    // Events are forwarded to the CloudDesk local agent (clouddesk-agent.py / agent/index.js)
-    // running on localhost:9009, which uses pyautogui/robotjs to execute real OS input.
+    // BOTH SIDES: Receive control events from the remote peer via WebRTC data channel.
+    // Events are forwarded to the local CloudDesk agent (clouddesk-agent.py)
+    // running on localhost:9009, which uses pyautogui to execute OS input.
+    // 
+    // For bidirectional control BOTH machines must run:
+    //   python terraform/agent/clouddesk-agent.py
     onDataMessage: (data) => {
       if (!data) {
-        console.warn('[Host] Received empty data message');
+        console.warn('[Control] Received empty data message');
         return;
       }
 
-      console.log('[Host] Received control event:', data.type, data.event);
+      console.log(`[Control] ${role.toUpperCase()} received event:`, data.type, data.event);
 
       // ── Forward to local OS agent ─────────────────────────────────────────
-      // The browser cannot move the OS cursor/send keystrokes directly —
-      // the local agent bridges the gap (exactly like AnyDesk's desktop service).
+      // Both HOST and VIEWER forward to their local agent at localhost:9009
+      // This enables bidirectional control
       fetch('http://localhost:9009/control', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -88,10 +94,10 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
       })
         .then((response) => {
           if (!response.ok) {
-            console.error('[Host] Agent returned status:', response.status);
+            console.error(`[Control] Agent error (status ${response.status})`);
             setAgentStatus('offline');
           } else {
-            console.log('[Host] Agent executed:', data.type, data.event);
+            console.log(`[Control] ${role.toUpperCase()} agent executed:`, data.type, data.event);
             setAgentStatus('online');
           }
           return response.json().catch(() => null);
@@ -376,7 +382,41 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
     sendControlEvent({ type: 'touch', event: 'touchend', touches: e.changedTouches.length });
   }, [controlEnabled, role, remoteStream, sendControlEvent]);
 
-  // Focus video element when control is activated (needed for keyboard events)
+  // Focus container and set up keyboard listeners when HOST control is activated
+  useEffect(() => {
+    if (!hostControlEnabled || role !== 'host') return;
+    
+    if (containerRef.current) {
+      containerRef.current.focus();
+    }
+    
+    // Add keyboard event listeners
+    const handleKeyDown = (e) => {
+      console.log('[HOST] Key down:', e.key);
+      handleHostKeyDown(e);
+    };
+    
+    const handleKeyUp = (e) => {
+      if (!hostControlEnabled) return;
+      console.log('[HOST] Key up:', e.key);
+      sendHostControlEvent({
+        type: 'key',
+        event: 'keyup',
+        key: e.key,
+        code: e.code,
+      });
+    };
+    
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [hostControlEnabled, role, handleHostKeyDown, sendHostControlEvent]);
+
+  // Focus video element when viewer control is activated (needed for keyboard events)
   useEffect(() => {
     if (controlEnabled && videoRef.current) {
       videoRef.current.focus();
@@ -432,6 +472,46 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
       : `${m}:${String(sec).padStart(2, '0')}`;
   };
 
+  // ── HOST: Send Remote Control Event to VIEWER ───
+  // When HOST enables control, they can click/type to control the VIEWER's machine
+  const sendHostControlEvent = useCallback((eventData) => {
+    if (!eventData || !sendRemoteControl) return;
+    
+    console.log('[HOST] Sending control to VIEWER:', eventData.type, eventData.event);
+    sendRemoteControl(eventData);
+    
+    // Visual feedback - show what key was pressed
+    if (!eventData.type.match(/mouse/)) {
+      setControlLog(`🖱 ${eventData.event}${eventData.event === 'click' ? ` (btn ${eventData.button})` : ''}`);
+      setTimeout(() => setControlLog(''), 1500);
+    }
+  }, [sendRemoteControl]);
+
+  // HOST: Mouse handlers for controlling VIEWER
+  const handleHostMouseClick = useCallback((e) => {
+    if (!hostControlEnabled || role !== 'host') return;
+    console.log('[HOST] Sending click to VIEWER');
+    sendHostControlEvent({
+      type: 'mouse',
+      event: 'click',
+      button: e.button,
+      x: Math.random() * 0.5 + 0.25, // simulation since host doesn't see viewer video
+      y: Math.random() * 0.5 + 0.25
+    });
+  }, [hostControlEnabled, role, sendHostControlEvent]);
+
+  const handleHostKeyDown = useCallback((e) => {
+    if (!hostControlEnabled || role !== 'host') return;
+    e.preventDefault();
+    sendHostControlEvent({
+      type: 'key',
+      event: 'keydown',
+      key: e.key,
+      code: e.code,
+      modifiers: { ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey },
+    });
+  }, [hostControlEnabled, role, sendHostControlEvent]);
+
   const stateColor = {
     connected: 'text-green-400',
     connecting: 'text-yellow-400',
@@ -472,6 +552,18 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
             </button>
           )}
 
+          {/* Control VIEWER (host only) - two-way control */}
+          {role === 'host' && (
+            <button
+              onClick={() => setHostControlEnabled(!hostControlEnabled)}
+              className={`p-2 rounded-lg transition-colors text-xs flex items-center gap-1.5 px-3 ${hostControlEnabled ? 'bg-blue-900/20 text-blue-400 border border-blue-900/40' : 'bg-dark-700 text-dark-300 hover:bg-dark-600'}`}
+              title="Control Viewer's Machine"
+            >
+              <ScreenShare className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">{hostControlEnabled ? 'Viewer Control ON' : 'Control Viewer'}</span>
+            </button>
+          )}
+
           {/* Remote Control toggle (viewer only) */}
           {role === 'viewer' && (
             <button
@@ -480,7 +572,7 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
               title="Toggle Remote Control"
             >
               <ScreenShare className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">{controlEnabled ? 'Control ON' : 'Control'}</span>
+              <span className="hidden sm:inline">{controlEnabled ? 'Host Control ON' : 'Host Control'}</span>
             </button>
           )}
 

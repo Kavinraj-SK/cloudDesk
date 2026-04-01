@@ -477,5 +477,7 @@ export function useWebRTC({ socket, roomId, role, onRemoteStream, onDataMessage 
     sendControlEvent,
     toggleMute,
     localStream: localStreamRef,
+    // Export for two-way control (both host and viewer can send events)
+    sendRemoteControl: sendControlEvent,
   };
 }
