@@ -27,6 +27,9 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
   const videoRef = useRef(null);
   const containerRef = useRef(null);
   const startTimeRef = useRef(Date.now());
+  // Throttle mouse-move to ~60fps to avoid flooding the WebRTC data channel
+  const pendingMoveRef = useRef(null);
+  const lastMovePos = useRef(null);
   const { socket, emit, on } = useSocket();
 
   const {
@@ -136,7 +139,7 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
   useEffect(() => {
     if (remoteStream && videoRef.current && !videoRef.current.srcObject) {
       videoRef.current.srcObject = remoteStream;
-      videoRef.current.play().catch(() => {});
+      videoRef.current.play().catch(() => { });
     }
   }, [remoteStream]);
 
@@ -171,7 +174,7 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
 
   const toggleFullscreen = () => {
     if (!document.fullscreenElement) {
-      containerRef.current?.requestFullscreen().catch(() => {});
+      containerRef.current?.requestFullscreen().catch(() => { });
       setIsFullscreen(true);
     } else {
       document.exitFullscreen();
@@ -194,7 +197,21 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
     if (!controlEnabled || role !== 'viewer') return;
     const pos = getRelativePos(e.clientX, e.clientY);
     if (!pos) return;
-    sendControlEvent({ type: 'mouse', event: 'move', ...pos });
+
+    // Skip duplicate positions (no actual movement)
+    const last = lastMovePos.current;
+    if (last && last.x === pos.x && last.y === pos.y) return;
+    lastMovePos.current = pos;
+
+    // RAF throttle — send at most once per animation frame (~16ms / 60fps)
+    // This prevents flooding the WebRTC data channel on fast mouse moves
+    if (pendingMoveRef.current) {
+      cancelAnimationFrame(pendingMoveRef.current);
+    }
+    pendingMoveRef.current = requestAnimationFrame(() => {
+      pendingMoveRef.current = null;
+      sendControlEvent({ type: 'mouse', event: 'move', ...pos });
+    });
   }, [controlEnabled, role, sendControlEvent]);
 
   const handleMouseClick = useCallback((e) => {
@@ -448,7 +465,7 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
           ) : (
             /* HOST side — sharing status card */
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 text-dark-500 p-4">
-              <div className="p-6 rounded-2xl border border-dark-700 bg-dark-900/80 text-center max-w-sm w-full relative">
+              <div className="p-6 rounded-2xl border border-dark-700 bg-dark-900/80 text-center max-w-sm w-full">
                 {isMobileDevice ? (
                   <Camera className="w-12 h-12 text-brand-red mx-auto mb-4" />
                 ) : (
@@ -486,24 +503,26 @@ export default function SessionRoom({ deskId, session, onEnd, onNotify }) {
                   </button>
                 )}
 
-                {/* Virtual cursor received from viewer */}
-                {virtualCursor && (
-                  <div className="absolute inset-0 pointer-events-none overflow-hidden rounded-2xl">
-                    <div
-                      className="absolute w-5 h-5 -translate-x-1/2 -translate-y-1/2 transition-all duration-75"
-                      style={{ left: `${virtualCursor.x}%`, top: `${virtualCursor.y}%` }}
-                    >
-                      <div className="w-full h-full rounded-full bg-brand-red border-2 border-white opacity-80 animate-ping absolute" />
-                      <div className="w-full h-full rounded-full bg-brand-red border-2 border-white opacity-90 relative" />
-                    </div>
-                  </div>
-                )}
               </div>
 
               {/* Control action log shown on host */}
               {controlLog && (
                 <div className="bg-dark-800 border border-dark-700 text-dark-300 text-xs px-3 py-1.5 rounded-full animate-fade-in">
                   {controlLog}
+                </div>
+              )}
+
+              {/* Virtual cursor received from viewer — covers the FULL host view area,
+                  not clipped inside the card, so it tracks any position on screen */}
+              {virtualCursor && (
+                <div className="absolute inset-0 pointer-events-none overflow-hidden">
+                  <div
+                    className="absolute w-5 h-5 -translate-x-1/2 -translate-y-1/2 transition-[left,top] duration-75"
+                    style={{ left: `${virtualCursor.x}%`, top: `${virtualCursor.y}%` }}
+                  >
+                    <div className="w-full h-full rounded-full bg-brand-red border-2 border-white opacity-80 animate-ping absolute" />
+                    <div className="w-full h-full rounded-full bg-brand-red border-2 border-white opacity-90 relative" />
+                  </div>
                 </div>
               )}
             </div>
